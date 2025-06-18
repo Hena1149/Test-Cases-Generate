@@ -1,3 +1,14 @@
+import subprocess
+import sys
+try:
+    import spacy
+    nlp = spacy.load("fr_core_news_sm")
+except (ImportError, OSError):
+    subprocess.run([sys.executable, "-m", "pip", "install", "spacy"])
+    subprocess.run([sys.executable, "-m", "spacy", "download", "fr_core_news_sm"])
+    import spacy
+    nlp = spacy.load("fr_core_news_sm")
+
 from utils.text_processing import is_similar
 from utils.text_processing import remove_duplicates
 try:
