@@ -1,5 +1,7 @@
 import subprocess
 import sys
+
+# Gestion de l'installation des dépendances
 try:
     import spacy
     nlp = spacy.load("fr_core_news_sm")
@@ -9,8 +11,18 @@ except (ImportError, OSError):
     import spacy
     nlp = spacy.load("fr_core_news_sm")
 
-from utils.text_processing import is_similar
-from utils.text_processing import remove_duplicates
+# Gestion compatible PyPDF2/pypdf
+try:
+    from pypdf import PdfReader as PDFReader
+except ImportError:
+    try:
+        import PyPDF2
+        PDFReader = PyPDF2.PdfReader
+    except ImportError:
+        subprocess.run([sys.executable, "-m", "pip", "install", "pypdf"])
+        from pypdf import PdfReader as PDFReader
+
+from utils.text_processing import is_similar, remove_duplicates, generate_wordcloud, clean_text
 try:
     import pyperclip
     PYPERCLIP_AVAILABLE = True
@@ -21,21 +33,18 @@ import streamlit as st
 import os
 import tempfile
 from utils.file_utils import process_uploaded_file, export_to_excel, export_test_cases_to_excel
-from utils.text_processing import generate_wordcloud, clean_text
 from utils.openai_utils import (
     split_text,
     generate_rules, 
     generate_checkpoints, 
     generate_test_cases
 )
-from utils.text_processing import is_similar
 from collections import Counter
 import io
 from docx import Document
 import re 
 from difflib import SequenceMatcher
 from datetime import datetime
-import PyPDF2
 from tqdm import tqdm
 
 def is_similar(text1: str, text2: str, threshold: float = 0.85) -> bool:
@@ -94,13 +103,9 @@ def show_progress(current, total, message):
     percent = int(progress * 100)
     progress_bar = st.progress(progress)
     
-    # Texte plus détaillé avec pourcentage et compteur
     progress_text = f"{percent}% - {message} ({current}/{total})"
-    
-    # Mise à jour de la barre
     progress_bar.progress(progress, text=progress_text)
     
-    # Nettoyage quand terminé
     if current == total:
         progress_bar.empty()
         st.toast(f"Tâche terminée : {message}", icon="✅")
@@ -130,7 +135,6 @@ def main():
         st.session_state.openai_key = st.text_input("Clé API OpenAI", type="password")
         st.session_state.openai_endpoint = st.text_input("Endpoint Azure OpenAI", "https://chat-genai.openai.azure.com/")
         st.session_state.model_name = st.selectbox("Modèle", ["gpt-4o", "gpt-35-turbo"])
-        
         st.divider()
         st.info("Configurez votre clé API et endpoint avant de commencer.")
 
@@ -143,14 +147,33 @@ def main():
         
         if uploaded_file is not None:
             with st.spinner("Extraction du texte en cours..."):
-                with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
-                    tmp_file.write(uploaded_file.getvalue())
-                    tmp_path = tmp_file.name
-                
-                st.session_state.text = process_uploaded_file(tmp_path)
-                os.unlink(tmp_path)
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as tmp_file:
+                        tmp_file.write(uploaded_file.getvalue())
+                        tmp_path = tmp_file.name
+                    
+                    # Vérification du fichier avant traitement
+                    if tmp_path.endswith('.docx'):
+                        # Vérification de la validité du DOCX
+                        from zipfile import ZipFile, BadZipFile
+                        try:
+                            with ZipFile(tmp_path) as z:
+                                if 'word/document.xml' not in z.namelist():
+                                    raise BadZipFile("Fichier DOCX invalide")
+                        except BadZipFile:
+                            st.error("Le fichier DOCX est corrompu ou invalide")
+                            os.unlink(tmp_path)
+                            st.stop()
+                    
+                    st.session_state.text = process_uploaded_file(tmp_path)
+                    st.success("Texte extrait avec succès !")
+                    
+                except Exception as e:
+                    st.error(f"Erreur lors du traitement du fichier : {str(e)}")
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
             
-            st.success("Texte extrait avec succès !")
             with st.expander("Aperçu du texte extrait"):
                 st.text(st.session_state.text[:2000] + "...")
 
@@ -161,7 +184,6 @@ def main():
             st.warning("Veuillez d'abord charger un document dans l'onglet Upload.")
             st.stop()
         
-        # Analyse textuelle de base
         col1, col2 = st.columns(2)
         
         with col1:
@@ -186,7 +208,6 @@ def main():
                 key="download_word_freq"
             )
 
-        # Génération des règles
         st.divider()
         st.subheader("Génération des règles de gestion")
         
@@ -215,11 +236,9 @@ def main():
                 except Exception as e:
                     st.error(f"Erreur lors de la génération : {str(e)}")
         
-        # Affichage et export des règles
         if hasattr(st.session_state, 'rules') and st.session_state.rules:
             st.divider()
             
-            # Aperçu interactif
             with st.expander(f"Aperçu des {len(st.session_state.rules)} règles", expanded=True):
                 show_rules = st.slider(
                     "Nombre de règles à afficher",
@@ -233,7 +252,6 @@ def main():
                 if len(st.session_state.rules) > show_rules:
                     st.info(f"Affichage de {show_rules}/{len(st.session_state.rules)} règles")
             
-            # Export multi-format
             st.subheader("Exporter les règles")
             export_format = st.radio("Format d'export", ["Word (.docx)", "Texte (.txt)", "Excel (.xlsx)"], horizontal=True, key="rules_export_format")
             
@@ -294,7 +312,6 @@ def main():
             st.warning("Veuillez d'abord charger un document dans l'onglet Upload.")
             st.stop()
         
-        # Nouvelle section pour la génération directe à partir du texte
         st.subheader("Génération directe à partir du texte")
         col_gen1, col_gen2 = st.columns([3, 1])
         
@@ -306,25 +323,21 @@ def main():
                     try:
                         progress_bar = st.progress(0, text="0% - Préparation...")
                         
-                        # Découpage du texte en chunks
                         chunks = [st.session_state.text[i:i+4000] for i in range(0, len(st.session_state.text), 4000)]
                         all_points = []
                         
                         for i, chunk in enumerate(chunks):
-                            # Mise à jour de la barre de progression
                             percent = int((i + 1) / len(chunks) * 100)
                             progress_bar.progress(percent / 100, text=f"{percent}% - Traitement du chunk {i+1}/{len(chunks)}")
                             
-                            # Génération des points pour chaque chunk
                             points = generate_checkpoints(
-                                [chunk],  # On passe le chunk comme une "règle"
+                                [chunk],
                                 st.session_state.openai_key,
                                 st.session_state.openai_endpoint,
                                 st.session_state.model_name
                             )
                             all_points.extend(points)
                         
-                        # Suppression des doublons
                         existing_points = getattr(st.session_state, 'existing_checkpoints', [])
                         final_points = remove_duplicates(all_points, existing_points)
                         
@@ -335,7 +348,6 @@ def main():
                     finally:
                         progress_bar.empty()
 
-        # Conserver la section existante pour la génération à partir des règles
         st.divider()
         st.subheader("Génération à partir des règles de gestion")
         
@@ -350,12 +362,10 @@ def main():
                         progress_bar = st.progress(0, text="0% - Préparation...")
                         total_rules = len(st.session_state.rules)
                         
-                        # Génération avec progression
                         new_points = []
                         batch_size = 5
                         
                         for i in range(0, total_rules, batch_size):
-                            # Mise à jour de la progression
                             processed = min(i + batch_size, total_rules)
                             percent = int(processed / total_rules * 100)
                             progress_bar.progress(percent / 100, text=f"{percent}% - Traitement des règles {processed}/{total_rules}")
@@ -379,7 +389,6 @@ def main():
                     finally:
                         progress_bar.empty()
 
-        # Section d'import des points existants
         st.subheader("Importer des points existants (facultatif)")
         existing_cp_file = st.file_uploader(
             "Téléverser un fichier de points existants",
@@ -391,17 +400,15 @@ def main():
         if existing_cp_file:
             with st.spinner("Analyse du fichier en cours..."):
                 try:
-                    # Extraction du contenu brut
                     if existing_cp_file.type == "text/plain":
                         content = existing_cp_file.getvalue().decode("utf-8")
                     elif existing_cp_file.type == "application/pdf":
-                        reader = PyPDF2.PdfReader(existing_cp_file)
+                        reader = PDFReader(existing_cp_file)  # Utilisation de PDFReader
                         content = "\n".join([page.extract_text() for page in reader.pages])
                     elif existing_cp_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
                         doc = Document(existing_cp_file)
                         content = "\n".join([para.text for para in doc.paragraphs])
                 
-                    # Extraction des points
                     pattern = r"^(Vérifier|S['']?assurer|Verifier|►|•|\d+[.)])\s+"
                     points = []
                     for line in content.split('\n'):
@@ -419,11 +426,9 @@ def main():
                 except Exception as e:
                     st.error(f"Erreur lors de l'extraction : {str(e)}")
 
-        # Visualisation des points
         if hasattr(st.session_state, 'checkpoints') and st.session_state.checkpoints:
             st.subheader("Visualisation des points")
             
-            # Outils de filtrage
             with st.expander("Filtres", expanded=False):
                 search_term = st.text_input("Recherche textuelle", key="cp_search")
                 col_sort, col_filter = st.columns(2)
@@ -432,7 +437,6 @@ def main():
                 with col_filter:
                     filter_type = st.selectbox("Filtrer par", ["Tous", "Existants uniquement", "Nouveaux uniquement"], key="filter_type_cp")
             
-            # Application des filtres
             filtered_points = st.session_state.checkpoints.copy()
             
             if search_term:
@@ -448,14 +452,12 @@ def main():
             if sort_order == "Ordre alphabétique":
                 filtered_points.sort(key=lambda x: x.lower())
             
-            # Pagination
             items_per_page = st.slider("Points par page", 5, 50, 10, key="cp_per_page")
             total_pages = max(1, (len(filtered_points) + items_per_page - 1) // items_per_page)
             page = st.number_input("Page", 1, total_pages, 1, key="cp_page")
             start_idx = (page - 1) * items_per_page
             end_idx = start_idx + items_per_page
             
-            # Affichage
             for i, point in enumerate(filtered_points[start_idx:end_idx], start=start_idx+1):
                 is_existing = hasattr(st.session_state, 'existing_checkpoints') and \
                             point in st.session_state.existing_checkpoints
@@ -478,7 +480,6 @@ def main():
             
             st.caption(f"Page {page}/{total_pages} • {len(filtered_points)} points filtrés • {len(st.session_state.checkpoints)} points au total")
 
-            # Export des points
             st.subheader("Exporter les points")
             export_format = st.radio("Format d'export", ["Word (.docx)", "Texte (.txt)", "Excel (.xlsx)"], horizontal=True, key="cp_export_format")
             
@@ -567,10 +568,8 @@ def main():
                         progress_bar = st.progress(0, text="0% - Préparation...")
                         st.session_state.test_cases = []
                         
-                        # Initialisation de la barre de progression
                         total = len(st.session_state.checkpoints)
                         
-                        # Génération des cas de test avec progression
                         test_cases = []
                         for i, checkpoint in enumerate(st.session_state.checkpoints, 1):
                             percent = int(i / total * 100)
@@ -590,7 +589,6 @@ def main():
                     except Exception as e:
                         st.error(f"Erreur de génération : {str(e)}")
 
-            # Affichage des résultats
             if hasattr(st.session_state, 'test_cases') and st.session_state.test_cases:
                 selected_case = st.selectbox(
                     "Sélectionnez un cas à visualiser",
@@ -601,7 +599,6 @@ def main():
                 
                 st.markdown(st.session_state.test_cases[selected_case])
                 
-                # Export
                 st.subheader("Exporter les cas de test")
                 export_format = st.radio("Format d'export", ["Word (.docx)", "Texte (.txt)", "Excel (.xlsx)"], horizontal=True, key="test_export_format")
                 
@@ -635,7 +632,7 @@ def main():
                         txt_content = "CAS DE TEST\n\n"
                         txt_content += f"Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}\n\n"
                         txt_content += "\n\n".join(
-                            f"=== CAS DE TEST {i+1} ===\n{re.sub(r'#+\s*|\*\*', '', case)}" 
+                            "=== CAS DE TEST {} ===\n{}".format(i+1, re.sub(r'#+\s*|\*\*', '', case))
                             for i, case in enumerate(st.session_state.test_cases)
                         )
                         
