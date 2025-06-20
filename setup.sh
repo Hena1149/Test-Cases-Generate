@@ -1,2 +1,4 @@
 #!/bin/bash
-python -m spacy download fr-core-news-sm
+python -m pip install --upgrade pip
+python -m spacy download fr_core_news_sm
+python -m nltk.downloader punkt stopwords
